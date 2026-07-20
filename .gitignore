@@ -21,3 +21,5 @@ env/
 .ipynb_checkpoints/
 .env.example
 .env
+
+src/test_db.py
