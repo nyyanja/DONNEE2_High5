@@ -35,3 +35,6 @@ CREATE TABLE IF NOT EXISTS fact_air_quality (
     pm10 DOUBLE PRECISION,
     nh3 DOUBLE PRECISION
 );
+
+ALTER TABLE fact_air_quality
+ADD CONSTRAINT uq_fact UNIQUE(city_id,time_id);
