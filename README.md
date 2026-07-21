@@ -2,241 +2,225 @@
 
 ## Project Overview
 
-This project implements a complete ETL pipeline for collecting, cleaning, and storing air quality data from the OpenWeather Air Pollution API. It processes both real-time and historical datasets to produce clean, analyzable data suitable for business intelligence and analytics workloads.
+An automated, production-grade ETL pipeline that ingests real-time and historical air quality data from the OpenWeather API. The architecture orchestrates workflow execution via Apache Airflow, deployed and provisioned through CI/CD pipelines managed by GitHub Actions. Processed datasets are delivered clean and optimized for downstream analytics and Business Intelligence applications.
 
-**Core Technologies:**
-- Python 3.11
-- PostgreSQL with psycopg2
-- OpenWeather Air Pollution API
-- requests library for HTTP communication
-- python-dotenv for configuration management
+## Tech Stack
 
-**Problem Statement Addressed:**
-- Automated collection of ambient air quality metrics across multiple cities
-- Temporal data management for both real-time and historical observations
-- Deduplication and normalization of raw sensor data into a clean dataset
-- Column-level validation and value range enforcement
-- Loading processed data into a dimensional data warehouse model
+| Component | Technology | Primary Use Case |
+|---|---|---|
+| Language | Python 3.11 | Core logic, extraction scripts, transformation processing |
+| Orchestration | Apache Airflow 2.10.2 | Pipeline dependency management, workflow monitoring |
+| Containerization | Docker | Environment standardization, portability, reproducibility |
+| Storage | PostgreSQL (Neon) + psycopg2 | Analytical data warehouse hosting dimensional star schema |
+| Data Source | OpenWeather API | Ingestion point for ambient air pollution metrics |
+| CI/CD | GitHub Actions | Automated execution, cron scheduling, secret management |
+| Configuration | python-dotenv | Environment-based credentials management |
 
-## Architecture and Project Structure
+## Key Engineering Challenges Solved
+
+| Domain | Challenge | Solution |
+|---|---|---|
+| Automation | Multi-city metrics collection | Hands-free daily execution via hybrid orchestration |
+| Time Series | Dual-mode tracking | Real-time collection + 6-month historical backfill |
+| Data Ingestion | Heterogeneous raw formats | Normalization, flattening, deduplication of JSON to CSV |
+| Data Quality | Schema violations, out-of-range values | Column-level validation, value range enforcement |
+| Data Modeling | Inefficient analytical queries | Dimensional star schema optimized for BI |
+| Resilience | Transient failures | Retry mechanisms, error handling, failure alerts |
+
+## Architecture
 
 ### Directory Organization
 ```
 DONNEE2_High5/
-├── raw/                    # Raw JSON responses from OpenWeather API
-├── clean/                  # Cleaned CSV dataset output
-├── src/                    # Pipeline source code
-│   ├── collect.py          # Real-time data collection
-│   ├── backfill.py         # Historical data retrieval
-│   ├── clean.py            # Data normalization and deduplication
-│   ├── validate_clean.py   # Data quality validation
-│   ├── load_warehouse.py   # Warehouse loading orchestrator
-│   └── warehouse/          # Database interaction layer
-│       ├── db.py           # PostgreSQL connection manager
-│       └── models.py       # Dimensional model insertion logic
+├── dags/                           # Airflow DAG definitions
+│   └── air_quality_pipeline.py     # 5-task sequential pipeline
+├── raw/                            # Raw JSON responses (immutable source of truth)
+├── clean/                          # Cleaned CSV output
+├── src/                            # ETL pipeline source code
+│   ├── collect.py                  # Real-time data collection
+│   ├── backfill.py                 # Historical data retrieval (6-month window)
+│   ├── clean.py                    # Normalization and deduplication
+│   ├── validate_clean.py           # 7-category data quality validation
+│   ├── load_warehouse.py           # Warehouse loading orchestrator
+│   └── warehouse/
+│       ├── db.py                   # PostgreSQL connection manager
+│       └── models.py               # Idempotent insertion logic
 ├── sql/
-│   └── create_schema.sql   # Star schema DDL definitions
-├── requirements.txt        # Python dependencies
-└── .github/
-    └── workflows/
-        └── daily_pipeline.yml  # CI/CD automation
+│   └── create_schema.sql           # Star schema DDL (dim_city, dim_time, fact_air_quality)
+├── Dockerfile                      # Airflow 2.10.2 + Python 3.11 image
+├── requirements.txt                # Python dependencies
+└── .github/workflows/
+    └── daily_pipeline.yml          # CI/CD automation workflow
 ```
 
+### Hybrid Orchestration Architecture
+
+**Two-Tier Strategy: GitHub Actions provisions infrastructure; Apache Airflow orchestrates the pipeline.**
+
+**Tier 1 - GitHub Actions (Infrastructure Layer):**
+Provisions an Ubuntu runner, starts a temporary PostgreSQL service container for Airflow metadata, builds the Docker image, launches the Airflow scheduler, triggers DAG execution, monitors completion, and performs cleanup. Eliminates need for a permanently running Airflow server.
+
+**Tier 2 - Apache Airflow (Orchestration Layer):**
+Executes the `air_quality_pipeline` DAG defining five sequential tasks with built-in retry logic (1 retry, 5-minute delay), dependency management, and state reporting. Configured with `catchup=False` to prevent backfilling missed intervals.
+
+### Database Architecture: Two Distinct PostgreSQL Instances
+
+**Airflow Metadata Database (Temporary - Local Service Container):**
+Transient PostgreSQL instance for Airflow's internal state (DAG runs, task statuses, scheduler info). Created at workflow start, destroyed during cleanup. No connection to business data.
+
+**Neon Data Warehouse (Permanent - Cloud Hosted):**
+Production data warehouse hosted on Neon (serverless PostgreSQL). Stores dimensional model (`dim_city`, `dim_time`, `fact_air_quality`). Accumulates historical data across all executions. Connection parameters stored as GitHub Secrets.
+
+```
+GitHub Actions Cron (01:00 UTC)
+    │
+    ├── Start PostgreSQL Container (Temporary - Airflow Metadata)
+    │       └── postgresql://airflow:airflow@localhost:5432/airflow
+    │
+    ├── Build Docker Image
+    ├── airflow db init → Temporary DB
+    ├── Launch Airflow Scheduler
+    └── Trigger DAG: air_quality_pipeline
+            │
+            ├── Task 1: collect_data → raw/*.json
+            ├── Task 2: backfill_data → raw/*.json
+            ├── Task 3: clean_data → clean/air_quality_clean.csv
+            ├── Task 4: validate_data → Quality checks
+            └── Task 5: load_warehouse → Neon PostgreSQL (PERMANENT)
+                    ├── dim_city
+                    ├── dim_time
+                    └── fact_air_quality
+```
+
+### Secret Management
+
+| Secret | Purpose | Target |
+|--------|---------|--------|
+| `OPENWEATHER_API_KEY` | API authentication | OpenWeather API |
+| `DB_HOST` | Neon hostname | Neon (Permanent) |
+| `DB_PORT` | Neon port | Neon (Permanent) |
+| `DB_NAME` | Neon database name | Neon (Permanent) |
+| `DB_USER` | Neon user | Neon (Permanent) |
+| `DB_PASSWORD` | Neon password | Neon (Permanent) |
+
+Temporary Airflow DB uses hardcoded local credentials (`airflow:airflow@localhost:5432`) - no sensitive data stored.
+
 ### Architectural Design Decisions
-- **Clear ETL Separation**: Each pipeline stage (Extract, Transform, Load) is implemented as an independent, testable Python module
-- **Raw Data Preservation**: All API responses stored as individual JSON files in `raw/` directory, serving as immutable source of truth
-- **Deterministic Cleaning**: The clean CSV is fully reconstructable from raw files at any time
-- **Star Schema Model**: Dimensional model (`dim_city`, `dim_time`, `fact_air_quality`) optimized for analytical queries on timestamped city measurements
-- **Environment-Based Configuration**: All sensitive credentials managed through environment variables using `.env` files locally and GitHub Secrets in CI/CD
+
+- **ETL Separation**: Independent, testable modules per pipeline stage enabling isolated debugging
+- **Raw Data Preservation**: Immutable JSON files serve as source of truth and audit trail
+- **Deterministic Cleaning**: Identical raw inputs always produce identical CSV output
+- **Star Schema**: Surrogate keys, city/time dimensions optimized for analytical aggregation
+- **Environment-Based Config**: `.env` for local dev, GitHub Secrets for CI/CD - zero hardcoded credentials
+- **Hybrid Orchestration**: Airflow's scheduling without permanent server costs
 
 ## Technical Implementation
 
-### Data Collection Module
+### Data Collection (`src/collect.py`)
+Queries OpenWeather API for five cities. Enriches responses with metadata (`_meta` key). Persists as JSON files in `raw/`. Implements exponential backoff retry for network errors and HTTP 5xx responses.
 
-The `src/collect.py` script queries the OpenWeather Air Pollution API for five predefined cities specified in the `VILLES` configuration. Each API response is enriched with metadata fields under the `_meta` key (collection timestamp, city name, API endpoint) and persisted as an independent JSON file in the `raw/` directory. The implementation includes an exponential backoff retry mechanism handling network timeouts and HTTP 5xx server errors, ensuring resilience against transient API failures.
+### Historical Backfill (`src/backfill.py`)
+Retrieves historical data via `air_pollution/history` endpoint. Batches requests into 5-day windows (API limit). Idempotent: skips existing files. Configurable depth via `--months` parameter (default: 6).
 
-### Historical Backfill
+### Data Cleaning (`src/clean.py`)
+Reconstructs `clean/air_quality_clean.csv` from all raw files through sequential operations:
+1. **Flatten**: Expand nested JSON into flat CSV rows
+2. **Normalize**: Standardize missing values to empty cells
+3. **Deduplicate**: Composite key (city + hour), retain most recent record
+4. **Sort**: City name then timestamp
+5. **Preserve metadata**: Collection timestamps retained for lineage
 
-The `src/backfill.py` module retrieves historical air quality data through OpenWeather's `air_pollution/history` endpoint. To comply with API rate limits, requests are batched into five-day windows. Each hourly measurement is stored as a separate JSON file within `raw/`, maintaining consistency with the real-time collection format. The script implements idempotency by checking for existing files before making API calls, enabling safe re-execution without data duplication.
+### Data Validation (`src/validate_clean.py`)
+Seven-category validation framework:
+- **Structural**: File existence, column presence/ordering
+- **Uniqueness**: Composite key constraints
+- **Temporal**: Chronological ordering within city groups
+- **Cardinality**: Minimum 5 distinct cities
+- **Range**: Valid coordinates, AQI 1-5, pollutant bounds
+- **Format**: ISO 8601 UTC timestamps
+- **Observability**: Non-blocking warnings for gaps and missing values
 
-### Data Cleaning and Normalization
+Critical errors halt pipeline; warnings logged but non-blocking.
 
-The `src/clean.py` transformation layer reconstructs `clean/air_quality_clean.csv` from all raw JSON files. The cleaning process:
-- Flattens nested JSON structures into flat CSV rows
-- Standardizes missing values to empty cells rather than null placeholders
-- Generates a composite deduplication key combining city name and measurement hour
-- Retains only the most recent measurement when duplicate records exist
-- Sorts output by city name then timestamp for consistent ordering
+### Data Warehouse Loading (`src/load_warehouse.py`)
 
-### Data Validation Framework
+**Schema (Star Schema):**
+- `dim_city`: City name, coordinates, surrogate key
+- `dim_time`: Timestamp, date components, surrogate key
+- `fact_air_quality`: AQI, pollutants (CO, NO, NO2, O3, SO2, PM2.5, PM10, NH3), foreign keys to dimensions
 
-The `src/validate_clean.py` module enforces a strict data contract on the cleaned CSV output. Validation checks include:
-- File existence and non-empty content verification
-- Column presence and ordering validation against expected schema
-- Uniqueness constraint enforcement on the composite key (city + timestamp)
-- Chronological sort order verification within each city group
-- Minimum cardinality check requiring at least five distinct cities
-- Value range validation for coordinates, timestamps, Air Quality Index, and pollutant concentrations
-- ISO 8601 UTC timestamp format verification
+**Loading Strategy:**
+- `db.py`: Connection manager using environment variables
+- `models.py`: Idempotent inserts via `ON CONFLICT` clauses
+- Orchestrator populates dimensions first, then fact records
 
-Non-blocking warnings are generated for missing values and temporal gaps, providing observability without halting pipeline execution.
+## Team & Contributions
 
-### Data Warehouse Loading
-
-The dimensional model is defined in `sql/create_schema.sql` with three tables:
-- `dim_city`: City dimension with geographic coordinates
-- `dim_time`: Time dimension at hourly granularity
-- `fact_air_quality`: Fact table containing AQI and pollutant measurements
-
-The `src/warehouse/db.py` module manages PostgreSQL connections using environment variables for configuration. The `src/warehouse/models.py` module provides idempotent insertion functions using ON CONFLICT clauses, ensuring safe re-execution. The orchestrator `src/load_warehouse.py` reads the cleaned CSV and sequentially populates dimensions before loading fact records.
-
-
-## Project Management and Task Distribution
-
-This project represents a collaborative effort across a five-member team, with clear separation of responsibilities spanning architecture design, ETL pipeline development, CI/CD automation, and technical documentation.
-
-| Author| Primary Responsibilities | Key Files |
+| Member | Role | Key Contributions |
 |---|---|---|
-| deep-awak (Mahery)| Project architecture design, tool selection, technical documentation, system design decisions | README.md, architecture planning |
-| saviola24 (Gael)| Repository initialization, data collection module, historical backfill implementation, network resilience patterns | src/collect.py, src/backfill.py, raw/ |
-| Nassigael| GitHub Actions CI/CD workflow implementation, pipeline automation | .github/workflows/daily_pipeline.yml |
-| Fiononantsoa01| Data cleaning and normalization, CSV dataset generation, data validation framework | src/clean.py, src/validate_clean.py, clean/air_quality_clean.csv |
-| nyyanja / NyAnja| Data warehouse schema design, database interaction layer, configuration management, warehouse loading orchestration | sql/create_schema.sql, src/load_warehouse.py, src/warehouse/models.py, src/warehouse/db.py |
-
-### Role Delineation
-
-**Mahery (deep-awak)** served as the project architect and technical documentation lead. Responsibilities included defining the overall system architecture, selecting the technology stack (Python, PostgreSQL, OpenWeather API, GitHub Actions), establishing the ETL pipeline design patterns, and authoring comprehensive technical documentation including this README. 
-
-**saviola24** focused on the extraction layer of the pipeline, implementing robust API communication with retry logic for resilience against network failures, historical data backfilling with rate-limit awareness respecting OpenWeather API constraints, and establishing the raw data preservation strategy that serves as the immutable foundation for all downstream processing.
-
-**Nassigael** implemented the CI/CD automation layer through GitHub Actions workflows. This contribution established automated daily pipeline execution with resource optimization strategies including conditional builds, caching mechanisms, and proper secret management. The workflow ensures consistent, unattended data collection and warehouse updates while minimizing GitHub Actions minutes consumption.
-
-**Fiononantsoa01** handled the transformation layer, developing the deterministic cleaning process that reconstructs the canonical CSV dataset from raw JSON files, implementing deduplication logic based on composite keys, and building the comprehensive validation framework that enforces data quality standards through multiple validation checks.
-
-**nyyanja / NyAnja** architected the storage layer, designing the dimensional star schema model optimized for analytical queries, implementing idempotent database insertion functions using ON CONFLICT clauses, creating the database connection abstraction layer, and orchestrating the end-to-end warehouse loading process.
-
-## Continuous Integration and Automated Pipeline Execution
-
-### GitHub Actions Workflow Architecture
-
-The project implements automated daily pipeline execution through a GitHub Actions workflow defined in `.github/workflows/daily_pipeline.yml`. This automation ensures consistent data collection and warehouse updates without manual intervention.
-
-**Workflow Trigger Configuration:**
-The pipeline is scheduled to execute every day using a cron expression. The schedule timing was selected to process the previous day's complete data after midnight UTC, ensuring all hourly measurements are available from the API. The workflow also supports manual triggering through the `workflow_dispatch` event for ad-hoc executions and testing.
-
-**Resource Optimization Strategy:**
-The workflow implementation prioritizes resource efficiency through several design decisions:
-- Conditional Docker builds triggered only when source files change, preventing unnecessary image reconstruction
-- GitHub Actions cache utilization for Docker layers and Python dependencies, reducing build times by approximately 60%
-- Direct Python execution replacing the original Docker-based approach, eliminating container initialization overhead
-- PostgreSQL service containers with health checks instead of embedded database initialization
-- Aggressive timeout limits (15 minutes maximum) preventing hung processes from consuming excess minutes
-
-**Secret Management:**
-All sensitive credentials (API keys, database connection strings) are stored as GitHub Secrets and injected as environment variables at runtime. This approach prevents credential exposure in logs or source code while maintaining accessibility to the pipeline. The workflow references secrets including `OPENWEATHER_API_KEY`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD`.
-
-**Pipeline Execution Flow:**
-1. **Change Detection**: The workflow checks for modifications to DAG definitions, requirements, or Dockerfile since the last successful run
-2. **Dependency Installation**: Python packages are installed with pip cache enabled for faster subsequent runs
-3. **Database Service Initialization**: A temporary PostgreSQL container starts with health checks ensuring availability before pipeline execution
-4. **Sequential ETL Execution**: Scripts execute in dependency order (collect, clean, validate, load) with error propagation
-5. **Automatic Cleanup**: Service containers and temporary files are removed regardless of execution success or failure
-
-### Workflow Verification and Monitoring
-
-**Execution Monitoring:**
-Pipeline runs are visible in the GitHub repository's Actions tab, displaying real-time logs, execution duration, and success/failure status. Each step produces structured log output for debugging and audit purposes.
-
-**Failure Notification:**
-On workflow failure, an automated GitHub Issue is created containing the run ID and direct link to the failed execution, enabling rapid response to pipeline interruptions.
-
-**Status Badge:**
-A workflow status badge integrated into this README provides immediate visibility into the current pipeline health state.
+| **Mahery (deep-awak)** | Project Architect & Documentation | System architecture design, technology selection, ETL patterns, technical documentation |
+| **Saviola (saviola24)** | Extraction Layer Engineer | API clients with retry logic, raw data preservation strategy, historical backfill module |
+| **Nassigael** | CI/CD Automation Engineer | GitHub Actions workflow, hybrid orchestration, service containers, resource optimization |
+| **Fiononantsoa01** | Transformation Layer Engineer | Data cleaning/normalization, 7-category validation framework, CSV generation |
+| **nyyanja / NyAnja** | Storage Layer Engineer | Star schema design, idempotent insertion logic, database abstraction, warehouse loading |
 
 ## Deployment Instructions
 
 ### 1. Environment Setup
-
 ```bash
-cd /workspaces/DONNEE2_High5
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
+pip install --upgrade pip
 pip install -r requirements.txt
 pip install psycopg2-binary
 ```
 
-### 2. Environment Variables Configuration
-
-Copy the configuration template:
-
+### 2. Configuration
 ```bash
 cp .env.example .env
+# Set: OPENWEATHER_API_KEY, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DB_PORT
 ```
 
-Complete the following variables in `.env`:
-- `OPENWEATHER_API_KEY`: OpenWeather API authentication key
-- `DB_HOST`: PostgreSQL server hostname
-- `DB_NAME`: Target database name
-- `DB_USER`: Database user with write permissions
-- `DB_PASSWORD`: Database user password
-- `DB_PORT`: PostgreSQL connection port (default: 5432)
-
-The GitHub Actions workflow retrieves these same values from GitHub Secrets, ensuring consistent configuration across local and automated executions.
-
-### 3. Real-Time Data Collection
-
+### 3. Pipeline Execution (Local)
 ```bash
-python src/collect.py
+python src/collect.py                    # Real-time collection
+python src/backfill.py --months 6        # Historical backfill
+python src/clean.py                      # Generate clean CSV
+python src/validate_clean.py             # Validate data quality
+psql -f sql/create_schema.sql            # Create warehouse schema
+python src/load_warehouse.py             # Load into Neon
 ```
 
-### 4. Historical Backfill (6-Month Window)
+### 4. Automated Execution
+Pipeline runs daily at 01:00 UTC via GitHub Actions. Manual trigger available through `workflow_dispatch`. Monitor in Actions tab.
 
-```bash
-python src/backfill.py --months 6
-```
+### Operational Notes
+- `raw/` directory is immutable source of truth - preserve all files
+- `clean/air_quality_clean.csv` is fully reconstructed each run - do not edit manually
+- `backfill.py` is idempotent and safe for re-execution
+- All scripts return non-zero exit codes on failure for proper error propagation
+- Warehouse loading requires Neon PostgreSQL; other stages run independently
 
-### 5. Clean Dataset Generation
-
-```bash
-python src/clean.py
-```
-
-### 6. Data Validation
-
-```bash
-python src/validate_clean.py
-```
-
-### 7. Warehouse Schema Creation
-
-Execute the DDL script against an accessible PostgreSQL instance:
-
-```bash
-psql "host=$DB_HOST port=$DB_PORT dbname=$DB_NAME user=$DB_USER password=$DB_PASSWORD" -f sql/create_schema.sql
-```
-
-### 8. Data Warehouse Loading
-
-```bash
-python src/load_warehouse.py
-```
-
-### 9. Operational Notes
-
-- The `raw/` directory serves as the immutable data lake containing collected and backfilled measurements. These files must be preserved as the system's source of truth.
-- The `clean/air_quality_clean.csv` file is fully reconstructed on each execution of `src/clean.py` and should not be manually edited.
-- The `src/backfill.py` script is designed for safe re-execution, automatically skipping previously retrieved data files.
-- All pipeline scripts return non-zero exit codes on failure, enabling proper error propagation in both local and CI/CD environments.
-
-## Ressources
-
-Ce projet intègre des pipelines automatisés et des environnements conteneurisés. Voici les ressources clés utilisées pour leur apprentissage et leur mise en œuvre :
+## Resources
 
 ### GitHub Actions
-*   **Documentation Officielle GitHub** : [Quickstart for GitHub Actions](https://github.com) — Guide fondamental pour comprendre la syntaxe des fichiers YAML, les déclencheurs (`cron`, `workflow_dispatch`) et les secrets.
-*   **GitHub Packages** : [Working with the Container registry](https://github.com) — Guide officiel pour s'authentifier et téléverser des images Docker sur `ghcr.io`.
+- [Understanding GitHub Actions](https://docs.github.com/en/actions) - Workflow syntax, cron triggers, secrets
+- [Workflow Syntax Reference](https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions) - Service containers, conditions, job dependencies
 
-### Docker & CI/CD
-*   **Docker Buildx** : [GitHub Actions Docker Setup](https://github.com) — Modèles de configuration pour la compilation, la gestion du cache avancé (`type=gha`) et la publication automatique d'images Docker.
-*   **Apache Airflow** : [Airflow CLI Reference](https://apache.org) — Références des commandes en ligne de commande pour initialiser les bases de données de test (`airflow db init`) et exécuter les tâches sans interface graphique (`airflow tasks test`).
+### Docker
+- [docker/setup-buildx-action](https://github.com/docker/setup-buildx-action) - Buildx configuration with caching
+- [Dockerfile Reference](https://docs.docker.com/engine/reference/builder/) - Layer optimization, security best practices
+
+### Apache Airflow
+- [Airflow CLI Reference](https://airflow.apache.org/docs/apache-airflow/stable/cli-and-env-vars-ref.html) - `db init`, `dags trigger`, `dags list-runs`
+- [DAG Authoring Guide](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/dags.html) - Task dependencies, retry configuration, catchup behavior
+- [Apache Airflow Docker Image](https://hub.docker.com/r/apache/airflow) - Official image, version tags
+
+### Python Libraries
+- [Requests](https://docs.python-requests.org/) - HTTP client with retry patterns
+- [python-dotenv](https://pypi.org/project/python-dotenv/) - Environment variable management
+- [psycopg2](https://www.psycopg.org/docs/) - PostgreSQL adapter
+
+### Data Engineering
+- [Dimensional Modeling Techniques](https://www.kimballgroup.com/data-warehouse-business-intelligence-resources/kimball-techniques/dimensional-modeling-techniques/) - Kimball star schema methodology
+- [ETL Best Practices](https://docs.aws.amazon.com/whitepapers/latest/etl-best-practices/welcome.html) - Idempotency, error handling, modular design patterns
