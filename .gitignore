@@ -19,3 +19,5 @@ env/
 
 # Notebooks checkpoints
 .ipynb_checkpoints/
+.dockerignore
+.gitignore
