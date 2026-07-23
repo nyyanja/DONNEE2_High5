@@ -25,10 +25,10 @@ if not API_KEY:
     )
 
 RAW_DIR = os.path.join(os.path.dirname(__file__), "..", "raw")
-API_URL = "http://api.openweathermap.org/data/2.5/air_pollution"
+API_URL = "https://api.openweathermap.org/data/2.5/air_pollution"
 
 MAX_RETRIES = 3
-RETRY_DELAY_SECONDS = 5  # secondes
+RETRY_DELAY_SECONDS = 5
 
 VILLES = [
     {"nom": "Antananarivo", "pays": "MG", "lat": -18.8792, "lon": 47.5079},
@@ -51,19 +51,17 @@ def fetch_with_retry(url, params, max_retries=MAX_RETRIES):
                 )
             resp.raise_for_status()
             return resp.json()
-        except (requests.exceptions.RequestException,) as e:
+        except requests.exceptions.RequestException as e:
             last_error = e
             if attempt < max_retries:
                 print(f"  tentative {attempt}/{max_retries} échouée ({e}), retry dans {RETRY_DELAY_SECONDS}s...")
                 time.sleep(RETRY_DELAY_SECONDS)
     raise RuntimeError(f"Échec après {max_retries} tentatives: {last_error}")
 
+
 def collect_city(ville):
     params = {"lat": ville["lat"], "lon": ville["lon"], "appid": API_KEY}
     data = fetch_with_retry(API_URL, params)
-
-    # On enrichit avec le contexte ville pour ne rien perdre en aval.
-    # Le JSON brut d'origine n'est jamais altéré, on ajoute juste des métadonnées.
     data["_meta"] = {
         "ville": ville["nom"],
         "pays": ville["pays"],
@@ -72,6 +70,7 @@ def collect_city(ville):
         "collected_at": datetime.now(timezone.utc).isoformat(),
     }
     return data
+
 
 def save_raw(ville_nom, data):
     os.makedirs(RAW_DIR, exist_ok=True)
@@ -99,11 +98,8 @@ def main():
 
     print(f"\nRésumé: {success} succès, {failed} échecs")
     if failed > 0:
-        # Code de sortie non-zéro pour que GitHub Actions marque le run en échec
-        # si au moins une ville n'a pas pu être collectée.
         exit(1)
 
 
 if __name__ == "__main__":
     main()
-
