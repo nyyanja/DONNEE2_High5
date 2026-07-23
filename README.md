@@ -1,4 +1,4 @@
-# DONNEE2: OpenWeather - Air Quality Data Pipeline
+# OpenWeather - Air Quality Data Pipeline
 
 ## Project Overview
 
