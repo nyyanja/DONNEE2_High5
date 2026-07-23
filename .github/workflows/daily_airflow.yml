@@ -55,7 +55,6 @@ jobs:
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
-          # 1. Démarrage du Scheduler Airflow en arrière-plan
           docker run -d --name airflow_scheduler --network host \
             -e OPENWEATHER_API_KEY=$OPENWEATHER_API_KEY \
             -e DB_HOST=$DB_HOST \
@@ -69,16 +68,13 @@ jobs:
             air_quality_pipeline:latest \
             bash -c "airflow scheduler"
           
-          # Pause pour laisser le temps au scheduler d'analyser le dossier dags/
           sleep 15
           
-          # 2. Déclenchement manuel du DAG via l'API CLI d'Airflow
           docker run --rm --network host \
             -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@localhost:5432/airflow \
             air_quality_pipeline:latest \
             airflow dags trigger air_quality_pipeline
           
-          # 3. Boucle de surveillance de l'état d'exécution (Monitoring Loop)
           echo "Monitoring DAG execution..."
           MAX_WAIT=600
           WAIT_TIME=0
@@ -114,3 +110,41 @@ jobs:
         run: |
           docker stop airflow_scheduler || true
           docker rm airflow_scheduler || true
+              - name: Send success email notification
+        if: success() # S'exécute uniquement si toutes les étapes précédentes ont réussi
+        uses: dawidd6/action-send-mail@v4
+        with:
+          server_address: ://gmail.com
+          server_port: 465
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "🟢 [GitHub Actions] Pipeline Airflow Réussi !"
+          to: destination@example.com  # Remplacer par votre adresse e-mail
+          from: GitHub Actions Pipeline <votre-email@gmail.com>
+          body: |
+            Le pipeline 'Daily Airflow DAG Pipeline' s'est exécuté avec succès.
+            Dépôt : ${{ github.repository }}
+            Branche : ${{ github.ref_name }}
+            Commit : ${{ github.sha }}
+            
+            Consulter les logs : https://github.com{{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      - name: Send failure email notification
+        if: failure()
+        uses: dawidd6/action-send-mail@v4
+        with:
+          server_address: ://gmail.com
+          server_port: 465
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "🔴 [GitHub Actions] ÉCHEC du Pipeline Airflow"
+          to: razafimanantsoaamarah@gmail.com
+          from: GitHub Actions Pipeline <mahery.razafimanantsoa.dev@gmail.com>
+          body: |
+            Attention, une erreur est survenue lors de l'exécution du pipeline Airflow.
+            Dépôt : ${{ github.repository }}
+            Branche : ${{ github.ref_name }}
+            Commit : ${{ github.sha }}
+            
+            Veuillez analyser les erreurs ici : https://github.com{{ github.repository }}/actions/runs/${{ github.run_id }}
+
