@@ -21,3 +21,6 @@ env/
 .ipynb_checkpoints/
 .dockerignore
 .gitignore
+.env.example
+
+src/test_db.py
