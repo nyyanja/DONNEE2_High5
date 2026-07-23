@@ -1,0 +1,151 @@
+name: Daily Airflow DAG Pipeline
+
+on:
+  push:
+    branches: ["main"]
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  run-airflow-pipeline:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: airflow
+          POSTGRES_PASSWORD: airflow
+          POSTGRES_DB: airflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Build Airflow image
+        run: docker build -t air_quality_pipeline:latest .
+      
+      - name: Initialize Airflow metadata database
+        run: |
+          docker run --rm --network host \
+            -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@localhost:5432/airflow \
+            -e AIRFLOW__CORE__EXECUTOR=LocalExecutor \
+            -e AIRFLOW__CORE__LOAD_EXAMPLES=False \
+            air_quality_pipeline:latest \
+            bash -c "airflow db init"
+      
+      - name: Trigger and monitor DAG execution
+        env:
+          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          docker run -d --name airflow_scheduler --network host \
+            -e OPENWEATHER_API_KEY=$OPENWEATHER_API_KEY \
+            -e DB_HOST=$DB_HOST \
+            -e DB_PORT=$DB_PORT \
+            -e DB_NAME=$DB_NAME \
+            -e DB_USER=$DB_USER \
+            -e DB_PASSWORD=$DB_PASSWORD \
+            -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@localhost:5432/airflow \
+            -e AIRFLOW__CORE__EXECUTOR=LocalExecutor \
+            -e AIRFLOW__CORE__LOAD_EXAMPLES=False \
+            air_quality_pipeline:latest \
+            bash -c "airflow scheduler"
+          
+          sleep 15
+          
+          docker run --rm --network host \
+            -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@localhost:5432/airflow \
+            air_quality_pipeline:latest \
+            airflow dags trigger air_quality_pipeline
+          
+          echo "Monitoring DAG execution..."
+          MAX_WAIT=600
+          WAIT_TIME=0
+          
+          while [ $WAIT_TIME -lt $MAX_WAIT ]; do
+            STATUS=$(docker run --rm --network host \
+              -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@localhost:5432/airflow \
+              air_quality_pipeline:latest \
+              airflow dags list-runs -d air_quality_pipeline --limit 1 -o json 2>/dev/null | grep -o '"state": *"[^"]*"' | head -1 | cut -d'"' -f4)
+            
+            echo "Current DAG status: [$STATUS]"
+            
+            if [ "$STATUS" = "success" ]; then
+              echo "Pipeline completed successfully"
+              break
+            elif [ "$STATUS" = "failed" ]; then
+              echo "Pipeline failed"
+              exit 1
+            fi
+            
+            sleep 15
+            WAIT_TIME=$((WAIT_TIME + 15))
+          done
+          
+          if [ $WAIT_TIME -ge $MAX_WAIT ]; then
+            echo "Timeout waiting for DAG completion"
+            exit 1
+          fi
+      
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop airflow_scheduler || true
+          docker rm airflow_scheduler || true
+
+      - name: Send success email notification
+        if: success()
+        uses: dawidd6/action-send-mail@v4
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "[GitHub Actions] Pipeline Airflow Reussi"
+          to: ${{ secrets.EMAIL_TO }}
+          from: GitHub Actions Pipeline
+          body: |
+            Le pipeline Daily Airflow DAG Pipeline s'est execute avec succes.
+            
+            Depot : ${{ github.repository }}
+            Branche : ${{ github.ref_name }}
+            Commit : ${{ github.sha }}
+            
+            Logs : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      - name: Send failure email notification
+        if: failure()
+        uses: dawidd6/action-send-mail@v4
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "[GitHub Actions] ECHEC du Pipeline Airflow"
+          to: ${{ secrets.EMAIL_TO }}
+          from: GitHub Actions Pipeline
+          body: |
+            Une erreur est survenue lors de l'execution du pipeline Airflow.
+            
+            Depot : ${{ github.repository }}
+            Branche : ${{ github.ref_name }}
+            Commit : ${{ github.sha }}
+            
+            Logs : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
