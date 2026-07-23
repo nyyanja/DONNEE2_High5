@@ -43,7 +43,6 @@ jobs:
             -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@localhost:5432/airflow \
             -e AIRFLOW__CORE__EXECUTOR=LocalExecutor \
             -e AIRFLOW__CORE__LOAD_EXAMPLES=False \
-            -v $PWD/dags:/opt/airflow/dags \
             air_quality_pipeline:latest \
             bash -c "airflow db init"
       
@@ -56,7 +55,7 @@ jobs:
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
-          # Start Airflow scheduler in background
+          # 1. Démarrage du Scheduler Airflow en arrière-plan
           docker run -d --name airflow_scheduler --network host \
             -e OPENWEATHER_API_KEY=$OPENWEATHER_API_KEY \
             -e DB_HOST=$DB_HOST \
@@ -67,38 +66,37 @@ jobs:
             -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@localhost:5432/airflow \
             -e AIRFLOW__CORE__EXECUTOR=LocalExecutor \
             -e AIRFLOW__CORE__LOAD_EXAMPLES=False \
-            -v $PWD/dags:/opt/airflow/dags \
             air_quality_pipeline:latest \
             bash -c "airflow scheduler"
           
-          # Wait for scheduler to be ready
-          sleep 10
+          # Pause pour laisser le temps au scheduler d'analyser le dossier dags/
+          sleep 15
           
-          # Trigger the DAG
+          # 2. Déclenchement manuel du DAG via l'API CLI d'Airflow
           docker run --rm --network host \
             -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@localhost:5432/airflow \
-            -v $PWD/dags:/opt/airflow/dags \
             air_quality_pipeline:latest \
             airflow dags trigger air_quality_pipeline
           
-          # Monitor DAG execution
+          # 3. Boucle de surveillance de l'état d'exécution (Monitoring Loop)
           echo "Monitoring DAG execution..."
           MAX_WAIT=600
           WAIT_TIME=0
           
           while [ $WAIT_TIME -lt $MAX_WAIT ]; do
+            # Requête pour obtenir le statut exact du dernier run
             STATUS=$(docker run --rm --network host \
               -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@localhost:5432/airflow \
               air_quality_pipeline:latest \
-              airflow dags list-runs -d air_quality_pipeline --limit 1 -o json 2>/dev/null | grep -o '"state":"[^"]*"' | head -1 | cut -d'"' -f4)
+              airflow dags list-runs -d air_quality_pipeline --limit 1 -o json 2>/dev/null | grep -o '"state": *"[^"]*"' | head -1 | cut -d'"' -f4)
             
-            echo "DAG status: $STATUS"
+            echo "Current DAG status: [$STATUS]"
             
             if [ "$STATUS" = "success" ]; then
-              echo "Pipeline completed successfully"
+              echo "Pipeline completed successfully 🎉"
               break
             elif [ "$STATUS" = "failed" ]; then
-              echo "Pipeline failed"
+              echo "Pipeline failed ❌"
               exit 1
             fi
             
@@ -107,7 +105,7 @@ jobs:
           done
           
           if [ $WAIT_TIME -ge $MAX_WAIT ]; then
-            echo "Timeout waiting for DAG completion"
+            echo "Timeout waiting for DAG completion ⏱️"
             exit 1
           fi
       
