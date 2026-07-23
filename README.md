@@ -199,7 +199,7 @@ Pipeline runs daily at 01:00 UTC via GitHub Actions. Manual trigger available th
 - `clean/air_quality_clean.csv` is fully reconstructed each run - do not edit manually
 - `backfill.py` is idempotent and safe for re-execution
 - All scripts return non-zero exit codes on failure for proper error propagation
-- Warehouse loading requires Neon PostgreSQL; other stages run independently
+- Warehouse loading requires Neon PostgreSQL; other stages run independently.
 
 ## Resources
 
