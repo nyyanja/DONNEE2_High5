@@ -1,226 +1,200 @@
-# OpenWeather - Air Quality Data Pipeline
+# DONNEE2_High5 – Pipeline ETL de qualité de l'air
 
-## Project Overview
+## Présentation
 
-An automated, production-grade ETL pipeline that ingests real-time and historical air quality data from the OpenWeather API. The architecture orchestrates workflow execution via Apache Airflow, deployed and provisioned through CI/CD pipelines managed by GitHub Actions. Processed datasets are delivered clean and optimized for downstream analytics and Business Intelligence applications.
+Ce projet implémente un pipeline ETL entièrement automatisé qui collecte, nettoie, valide et charge dans un data warehouse des données de qualité de l'air (AQI) issues de l'API OpenWeather Air Pollution.  
+Il répond au cahier des charges du cours : ingestion horaire pour au moins 5 villes, backfill historique (12 mois), stockage brut immuable, reconstruction déterministe d’un fichier propre unique, modélisation dimensionnelle en étoile et exécution continue après le rendu.
 
-## Tech Stack
+**Stack technique**
 
-| Component | Technology | Primary Use Case |
-|---|---|---|
-| Language | Python 3.11 | Core logic, extraction scripts, transformation processing |
-| Orchestration | Apache Airflow 2.10.2 | Pipeline dependency management, workflow monitoring |
-| Containerization | Docker | Environment standardization, portability, reproducibility |
-| Storage | PostgreSQL (Neon) + psycopg2 | Analytical data warehouse hosting dimensional star schema |
-| Data Source | OpenWeather API | Ingestion point for ambient air pollution metrics |
-| CI/CD | GitHub Actions | Automated execution, cron scheduling, secret management |
-| Configuration | python-dotenv | Environment-based credentials management |
-
-## Key Engineering Challenges Solved
-
-| Domain | Challenge | Solution |
-|---|---|---|
-| Automation | Multi-city metrics collection | Hands-free daily execution via hybrid orchestration |
-| Time Series | Dual-mode tracking | Real-time collection + 6-month historical backfill |
-| Data Ingestion | Heterogeneous raw formats | Normalization, flattening, deduplication of JSON to CSV |
-| Data Quality | Schema violations, out-of-range values | Column-level validation, value range enforcement |
-| Data Modeling | Inefficient analytical queries | Dimensional star schema optimized for BI |
-| Resilience | Transient failures | Retry mechanisms, error handling, failure alerts |
+| Composant          | Technologie                      |
+| ------------------ | -------------------------------- |
+| Orchestrateur      | GitHub Actions (cron + manuel)   |
+| Langage            | Python 3.11                      |
+| Extraction         | `requests` avec retry            |
+| Stockage brut      | Fichiers JSON dans `raw/`        |
+| Stockage propre    | Fichier CSV unique dans `clean/` |
+| Data warehouse     | PostgreSQL (Neon, cloud gratuit) |
+| Modélisation       | Schéma en étoile                 |
+| CI/CD              | GitHub Actions                   |
+| Gestion des secrets| GitHub Secrets + `.env`          |
 
 ## Architecture
 
-### Directory Organization
-```
-DONNEE2_High5/
-├── dags/                           # Airflow DAG definitions
-│   └── air_quality_pipeline.py     # 5-task sequential pipeline
-├── raw/                            # Raw JSON responses (immutable source of truth)
-├── clean/                          # Cleaned CSV output
-├── src/                            # ETL pipeline source code
-│   ├── collect.py                  # Real-time data collection
-│   ├── backfill.py                 # Historical data retrieval (6-month window)
-│   ├── clean.py                    # Normalization and deduplication
-│   ├── validate_clean.py           # 7-category data quality validation
-│   ├── load_warehouse.py           # Warehouse loading orchestrator
-│   └── warehouse/
-│       ├── db.py                   # PostgreSQL connection manager
-│       └── models.py               # Idempotent insertion logic
-├── sql/
-│   └── create_schema.sql           # Star schema DDL (dim_city, dim_time, fact_air_quality)
-├── Dockerfile                      # Airflow 2.10.2 + Python 3.11 image
-├── requirements.txt                # Python dependencies
-└── .github/workflows/
-    └── daily_pipeline.yml          # CI/CD automation workflow
-```
-
-### Hybrid Orchestration Architecture
-
-**Two-Tier Strategy: GitHub Actions provisions infrastructure; Apache Airflow orchestrates the pipeline.**
-
-**Tier 1 - GitHub Actions (Infrastructure Layer):**
-Provisions an Ubuntu runner, starts a temporary PostgreSQL service container for Airflow metadata, builds the Docker image, launches the Airflow scheduler, triggers DAG execution, monitors completion, and performs cleanup. Eliminates need for a permanently running Airflow server.
-
-**Tier 2 - Apache Airflow (Orchestration Layer):**
-Executes the `air_quality_pipeline` DAG defining five sequential tasks with built-in retry logic (1 retry, 5-minute delay), dependency management, and state reporting. Configured with `catchup=False` to prevent backfilling missed intervals.
-
-### Database Architecture: Two Distinct PostgreSQL Instances
-
-**Airflow Metadata Database (Temporary - Local Service Container):**
-Transient PostgreSQL instance for Airflow's internal state (DAG runs, task statuses, scheduler info). Created at workflow start, destroyed during cleanup. No connection to business data.
-
-**Neon Data Warehouse (Permanent - Cloud Hosted):**
-Production data warehouse hosted on Neon (serverless PostgreSQL). Stores dimensional model (`dim_city`, `dim_time`, `fact_air_quality`). Accumulates historical data across all executions. Connection parameters stored as GitHub Secrets.
+<img width="1886" height="702" alt="Screenshot From 2026-07-22 23-08-00" src="https://github.com/user-attachments/assets/f52a84aa-d0a3-4576-b945-22944ad74f51" />
 
 ```
-GitHub Actions Cron (01:00 UTC)
-    │
-    ├── Start PostgreSQL Container (Temporary - Airflow Metadata)
-    │       └── postgresql://airflow:airflow@localhost:5432/airflow
-    │
-    ├── Build Docker Image
-    ├── airflow db init → Temporary DB
-    ├── Launch Airflow Scheduler
-    └── Trigger DAG: air_quality_pipeline
-            │
-            ├── Task 1: collect_data → raw/*.json
-            ├── Task 2: backfill_data → raw/*.json
-            ├── Task 3: clean_data → clean/air_quality_clean.csv
-            ├── Task 4: validate_data → Quality checks
-            └── Task 5: load_warehouse → Neon PostgreSQL (PERMANENT)
-                    ├── dim_city
-                    ├── dim_time
-                    └── fact_air_quality
+API OpenWeather (Air Pollution)
+        │
+        ▼
+[GitHub Actions – cron horaire]
+        │
+        ├─ collect.py ────────► raw/ (JSON bruts, un fichier par ville/appel)
+        ├─ backfill.py (1x/jour) ► raw/ (données historiques)
+        │
+        ▼
+[clean.py] ────────────────► clean/air_quality_clean.csv
+        │
+        ▼
+[validate_clean.py] ───────► validation (bloquante si échec critique)
+        │
+        ▼
+[load_warehouse.py] ───────► PostgreSQL Neon (schéma en étoile)
 ```
 
-### Secret Management
+- **raw/** : fichiers JSON immuables, jamais modifiés. Ils constituent la source de vérité.
+- **clean/** : un fichier CSV unique, reconstruit à chaque exécution depuis `raw/`, dédoublonné, trié, normalisé.
+- **Data warehouse** : base PostgreSQL hébergée sur Neon, accessible en permanence pour le cours IA1.
 
-| Secret | Purpose | Target |
-|--------|---------|--------|
-| `OPENWEATHER_API_KEY` | API authentication | OpenWeather API |
-| `DB_HOST` | Neon hostname | Neon (Permanent) |
-| `DB_PORT` | Neon port | Neon (Permanent) |
-| `DB_NAME` | Neon database name | Neon (Permanent) |
-| `DB_USER` | Neon user | Neon (Permanent) |
-| `DB_PASSWORD` | Neon password | Neon (Permanent) |
+L’orchestrateur est GitHub Actions, qui lance le pipeline toutes les heures (et sur déclenchement manuel). Aucun serveur externe n’est nécessaire.
 
-Temporary Airflow DB uses hardcoded local credentials (`airflow:airflow@localhost:5432`) - no sensitive data stored.
+## Villes surveillées
 
-### Architectural Design Decisions
+| Ville          | Pays            | Latitude  | Longitude |
+| -------------- | --------------- | --------- | --------- |
+| Antananarivo   | Madagascar (MG) | -18.8792  | 47.5079   |
+| Paris          | France (FR)     | 48.8566   | 2.3522    |
+| Nairobi        | Kenya (KE)      | -1.2921   | 36.8219   |
+| New York       | États-Unis (US) | 40.7128   | -74.0060  |
+| Tokyo          | Japon (JP)      | 35.6762   | 139.6503  |
 
-- **ETL Separation**: Independent, testable modules per pipeline stage enabling isolated debugging
-- **Raw Data Preservation**: Immutable JSON files serve as source of truth and audit trail
-- **Deterministic Cleaning**: Identical raw inputs always produce identical CSV output
-- **Star Schema**: Surrogate keys, city/time dimensions optimized for analytical aggregation
-- **Environment-Based Config**: `.env` for local dev, GitHub Secrets for CI/CD - zero hardcoded credentials
-- **Hybrid Orchestration**: Airflow's scheduling without permanent server costs
+## Format du fichier `clean/air_quality_clean.csv`
 
-## Technical Implementation
+Le fichier propre contient une ligne par ville et par heure, sans doublon, triée par ville puis par date/heure.
 
-### Data Collection (`src/collect.py`)
-Queries OpenWeather API for five cities. Enriches responses with metadata (`_meta` key). Persists as JSON files in `raw/`. Implements exponential backoff retry for network errors and HTTP 5xx responses.
+| Colonne              | Description                                    | Unité        |
+| -------------------- | ---------------------------------------------- | ------------ |
+| `ville`              | Nom de la ville                                | —            |
+| `pays`               | Code pays sur 2 lettres                        | —            |
+| `lat`                | Latitude                                       | degrés       |
+| `lon`                | Longitude                                      | degrés       |
+| `timestamp`          | Horodatage de la mesure (UTC, ISO 8601)        | —            |
+| `aqi`                | Air Quality Index (1 à 5)                      | indice       |
+| `co`                 | Concentration de CO                            | μg/m³        |
+| `no`                 | Concentration de NO                            | μg/m³        |
+| `no2`                | Concentration de NO₂                           | μg/m³        |
+| `o3`                 | Concentration d'O₃                             | μg/m³        |
+| `so2`                | Concentration de SO₂                           | μg/m³        |
+| `pm2_5`              | Concentration de PM2.5                         | μg/m³        |
+| `pm10`               | Concentration de PM10                          | μg/m³        |
+| `nh3`                | Concentration de NH₃                           | μg/m³        |
 
-### Historical Backfill (`src/backfill.py`)
-Retrieves historical data via `air_pollution/history` endpoint. Batches requests into 5-day windows (API limit). Idempotent: skips existing files. Configurable depth via `--months` parameter (default: 6).
+Les valeurs manquantes sont représentées par des cellules vides. Les colonnes respectent strictement cet ordre.
 
-### Data Cleaning (`src/clean.py`)
-Reconstructs `clean/air_quality_clean.csv` from all raw files through sequential operations:
-1. **Flatten**: Expand nested JSON into flat CSV rows
-2. **Normalize**: Standardize missing values to empty cells
-3. **Deduplicate**: Composite key (city + hour), retain most recent record
-4. **Sort**: City name then timestamp
-5. **Preserve metadata**: Collection timestamps retained for lineage
+## Data Warehouse
 
-### Data Validation (`src/validate_clean.py`)
-Seven-category validation framework:
-- **Structural**: File existence, column presence/ordering
-- **Uniqueness**: Composite key constraints
-- **Temporal**: Chronological ordering within city groups
-- **Cardinality**: Minimum 5 distinct cities
-- **Range**: Valid coordinates, AQI 1-5, pollutant bounds
-- **Format**: ISO 8601 UTC timestamps
-- **Observability**: Non-blocking warnings for gaps and missing values
+Le data warehouse suit un **schéma en étoile** avec une table de faits et deux dimensions.
 
-Critical errors halt pipeline; warnings logged but non-blocking.
+### dim_city
+| Colonne      | Type         | Description                |
+| ------------ | ------------ | -------------------------- |
+| `city_id`    | SERIAL (PK)  | Identifiant unique         |
+| `city_name`  | VARCHAR(100) | Nom de la ville            |
+| `country`    | CHAR(2)      | Code pays                  |
+| `latitude`   | FLOAT        | Latitude                   |
+| `longitude`  | FLOAT        | Longitude                  |
 
-### Data Warehouse Loading (`src/load_warehouse.py`)
+### dim_time
+| Colonne      | Type         | Description                        |
+| ------------ | ------------ | ---------------------------------- |
+| `time_id`    | SERIAL (PK)  | Identifiant unique                 |
+| `timestamp`  | TIMESTAMP    | Horodatage UTC                     |
+| `year`       | SMALLINT     | Année                              |
+| `month`      | SMALLINT     | Mois (1–12)                        |
+| `day`        | SMALLINT     | Jour du mois                       |
+| `hour`       | SMALLINT     | Heure (0–23)                       |
+| `weekday`    | VARCHAR(10)  | Jour de la semaine (ex: Monday)    |
+| `is_weekend` | BOOLEAN      | Vrai si samedi ou dimanche         |
 
-**Schema (Star Schema):**
-- `dim_city`: City name, coordinates, surrogate key
-- `dim_time`: Timestamp, date components, surrogate key
-- `fact_air_quality`: AQI, pollutants (CO, NO, NO2, O3, SO2, PM2.5, PM10, NH3), foreign keys to dimensions
+### fact_air_quality
+| Colonne      | Type         | Description                          |
+| ------------ | ------------ | ------------------------------------ |
+| `fact_id`    | SERIAL (PK)  | Identifiant unique                   |
+| `city_id`    | INT (FK)     | Référence à `dim_city`               |
+| `time_id`    | INT (FK)     | Référence à `dim_time`               |
+| `aqi`        | SMALLINT     | Air Quality Index (1–5)              |
+| `co`         | FLOAT        | Concentration de CO (μg/m³)          |
+| `no`         | FLOAT        | Concentration de NO (μg/m³)          |
+| `no2`        | FLOAT        | Concentration de NO₂ (μg/m³)         |
+| `o3`         | FLOAT        | Concentration d'O₃ (μg/m³)           |
+| `so2`        | FLOAT        | Concentration de SO₂ (μg/m³)         |
+| `pm2_5`      | FLOAT        | Concentration de PM2.5 (μg/m³)       |
+| `pm10`       | FLOAT        | Concentration de PM10 (μg/m³)        |
+| `nh3`        | FLOAT        | Concentration de NH₃ (μg/m³)         |
 
-**Loading Strategy:**
-- `db.py`: Connection manager using environment variables
-- `models.py`: Idempotent inserts via `ON CONFLICT` clauses
-- Orchestrator populates dimensions first, then fact records
+**Cohérence** : le nombre de lignes de `fact_air_quality` doit être approximativement `nombre_de_villes × nombre_d’heures_couvertes`. Les écarts sont expliqués dans la section « Période couverte et trous connus ».
 
-## Team & Contributions
+## Déploiement et exécution
 
-| Member | Role | Key Contributions |
-|---|---|---|
-| **Mahery (deep-awak)** | Project Architect & Documentation | System architecture design, technology selection, ETL patterns, technical documentation |
-| **Saviola (saviola24)** | Extraction Layer Engineer | API clients with retry logic, raw data preservation strategy, historical backfill module |
-| **Nassigael** | CI/CD Automation Engineer | GitHub Actions workflow, hybrid orchestration, service containers, resource optimization |
-| **Fiononantsoa01** | Transformation Layer Engineer | Data cleaning/normalization, 7-category validation framework, CSV generation |
-| **nyyanja / NyAnja** | Storage Layer Engineer | Star schema design, idempotent insertion logic, database abstraction, warehouse loading |
+### Prérequis (exécution locale)
+- Python 3.11
+- PostgreSQL accessible (pour la partie warehouse)
+- Clé API OpenWeather (plan gratuit)
 
-## Deployment Instructions
-
-### 1. Environment Setup
+### 1. Cloner le dépôt et préparer l’environnement
 ```bash
+git clone <url-du-depot>
+cd DONNEE2_High5
 python3 -m venv .venv
 source .venv/bin/activate
-pip install --upgrade pip
 pip install -r requirements.txt
-pip install psycopg2-binary
 ```
 
-### 2. Configuration
+### 2. Configurer les secrets / variables d’environnement
+Copier `.env.example` vers `.env` et renseigner :
+- `OPENWEATHER_API_KEY`
+- `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
+
+### 3. Exécuter manuellement le pipeline
 ```bash
-cp .env.example .env
-# Set: OPENWEATHER_API_KEY, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DB_PORT
+python src/collect.py               # Données temps réel
+python src/backfill.py --months 12  # Backfill historique (12 mois)
+python src/clean.py                 # Générer le CSV propre
+python src/validate_clean.py        # Valider le CSV
+python src/load_warehouse.py        # Charger dans le data warehouse
 ```
 
-### 3. Pipeline Execution (Local)
-```bash
-python src/collect.py                    # Real-time collection
-python src/backfill.py --months 6        # Historical backfill
-python src/clean.py                      # Generate clean CSV
-python src/validate_clean.py             # Validate data quality
-psql -f sql/create_schema.sql            # Create warehouse schema
-python src/load_warehouse.py             # Load into Neon
-```
+### 4. Automatisation avec GitHub Actions
+Le workflow `.github/workflows/air_quality_etl.yml` exécute le pipeline **toutes les heures**.  
+Il :
+- Collecte les données courantes
+- Exécute le backfill historique une fois par jour seulement (gain de temps)
+- Reconstruit le CSV propre, le valide, charge les données dans Neon
+- Commit automatiquement les nouveaux fichiers dans le dépôt (sans boucle infinie)
+- Envoie une notification par email en cas de succès ou d’échec
 
-### 4. Automated Execution
-Pipeline runs daily at 01:00 UTC via GitHub Actions. Manual trigger available through `workflow_dispatch`. Monitor in Actions tab.
+**Secrets GitHub requis** :
+- `OPENWEATHER_API_KEY`
+- `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
+- `EMAIL_USERNAME`, `EMAIL_PASSWORD`, `EMAIL_TO` (pour les notifications)
 
-### Operational Notes
-- `raw/` directory is immutable source of truth - preserve all files
-- `clean/air_quality_clean.csv` is fully reconstructed each run - do not edit manually
-- `backfill.py` is idempotent and safe for re-execution
-- All scripts return non-zero exit codes on failure for proper error propagation
-- Warehouse loading requires Neon PostgreSQL; other stages run independently.
+Aucune intervention humaine n’est nécessaire, le pipeline tourne 24h/24.
 
-## Resources
+## Période couverte et trous connus
 
-### GitHub Actions
-- [Understanding GitHub Actions](https://docs.github.com/en/actions) - Workflow syntax, cron triggers, secrets
-- [Workflow Syntax Reference](https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions) - Service containers, conditions, job dependencies
+- **Backfill initial** : 12 mois d’historique sont récupérés (soit environ 8760 heures par ville).  
+- **Collecte temps réel** : les données sont ajoutées toutes les heures depuis la mise en service du pipeline.  
+- **Écarts éventuels** :  
+  - L’API ne fournit pas toujours des données pour toutes les heures (trous ponctuels).  
+  - Les périodes de maintenance ou d’indisponibilité de l’API peuvent créer des lacunes.  
+  - Le nombre de lignes dans `fact_air_quality` peut donc être légèrement inférieur au produit `villes × heures`.  
+- **Déduplication** : en cas de relance du backfill, les fichiers existants sont ignorés ; le CSV propre ne contient jamais de doublons (clé composite ville + heure).
 
-### Docker
-- [docker/setup-buildx-action](https://github.com/docker/setup-buildx-action) - Buildx configuration with caching
-- [Dockerfile Reference](https://docs.docker.com/engine/reference/builder/) - Layer optimization, security best practices
+Les trous identifiés seront documentés dans un fichier `known_gaps.md` (ou cette section sera mise à jour après analyse).
 
-### Apache Airflow
-- [Airflow CLI Reference](https://airflow.apache.org/docs/apache-airflow/stable/cli-and-env-vars-ref.html) - `db init`, `dags trigger`, `dags list-runs`
-- [DAG Authoring Guide](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/dags.html) - Task dependencies, retry configuration, catchup behavior
-- [Apache Airflow Docker Image](https://hub.docker.com/r/apache/airflow) - Official image, version tags
+## Équipe et contributions
 
-### Python Libraries
-- [Requests](https://docs.python-requests.org/) - HTTP client with retry patterns
-- [python-dotenv](https://pypi.org/project/python-dotenv/) - Environment variable management
-- [psycopg2](https://www.psycopg.org/docs/) - PostgreSQL adapter
+| Membre                  | Rôle principal                              |
+| ----------------------- | ------------------------------------------- |
+| Mahery (deep-awak)      | Architecture, documentation, coordination   |
+| Saviola (saviola24)        | Extraction, collecte et backfill            |
+| Nassigael               | CI/CD, automatisation GitHub Actions        |
+| Fiononantsoa01          | Transformation, nettoyage, validation       |
+| nyyanja / NyAnja        | Modélisation, data warehouse, chargement    |
 
-### Data Engineering
-- [Dimensional Modeling Techniques](https://www.kimballgroup.com/data-warehouse-business-intelligence-resources/kimball-techniques/dimensional-modeling-techniques/) - Kimball star schema methodology
-- [ETL Best Practices](https://docs.aws.amazon.com/whitepapers/latest/etl-best-practices/welcome.html) - Idempotency, error handling, modular design patterns
+## Ressources
+
+- [Documentation OpenWeather Air Pollution](https://openweathermap.org/api/air-pollution)
+- [Documentation GitHub Actions](https://docs.github.com/actions)
+- [PostgreSQL Neon](https://neon.tech)
+- [Modélisation dimensionnelle (Kimball)](https://www.kimballgroup.com)
