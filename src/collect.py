@@ -5,6 +5,8 @@ via l'API OpenWeather Air Pollution.
 Chaque appel est sauvegardé tel quel (jamais modifié) dans raw/,
 un fichier par ville et par appel. C'est la source de vérité du pipeline.
 
+Auteur : Mahery (deep-awak) – Projet DONNEE2_High5
+
 Usage:
     export OPENWEATHER_API_KEY=xxxx
     python src/collect.py

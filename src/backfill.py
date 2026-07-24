@@ -5,6 +5,10 @@ Pour chaque ville et chaque heure disponible, écrit un fichier JSON dans raw/
 au même format que collect.py (une mesure par fichier, avec _meta).
 
 Le script est rejouable : les fichiers déjà présents sont ignorés.
+En cas d'échec partiel (ex. erreur serveur), le script termine normalement
+après avoir récupéré tout ce qui était possible. Les chunks manquants
+seront retentés au prochain run.
+
 
 Usage:
     export OPENWEATHER_API_KEY=xxxx
@@ -21,7 +25,6 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
-# Réutilise la config et le retry de collect.py pour rester cohérent.
 from collect import RAW_DIR, VILLES, fetch_with_retry
 
 API_KEY = os.environ.get("OPENWEATHER_API_KEY")
@@ -204,7 +207,9 @@ def main():
     )
 
     if total_failed > 0:
-        sys.exit(1)
+        print("⚠️  Certains chunks n'ont pas pu être récupérés. "
+              "Ils seront retentés lors du prochain run.")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
